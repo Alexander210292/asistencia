@@ -1,0 +1,5 @@
+bucket       = "REEMPLAZAR_POR_EL_BUCKET_DE_ESTADO"
+key          = "uagrm-asistencia/infra/terraform.tfstate"
+region       = "us-east-2"
+encrypt      = true
+use_lockfile = true

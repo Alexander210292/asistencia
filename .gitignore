@@ -1,0 +1,23 @@
+node_modules/
+tmp/
+coverage/
+
+# OpenTofu local state and variables
+**/.terraform/
+*.tfstate*
+*.tfplan
+*.tfvars
+*.pem
+*.key
+*.p12
+*.pfx
+**/backend.hcl
+
+# Local environment files; keep only documented example templates.
+.env
+.env.*
+!.env.*.example
+
+# Public repository exclusions: potentially personal or third-party documents.
+/docs/Requerimientos_Control_Asistencia.pdf
+/docs/plantilla-students.xlsx
