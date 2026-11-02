@@ -58,9 +58,9 @@ El backend solo sirve `/api`; no sirve HTML/CSS/JavaScript. Para desarrollo usa 
 
 ## Despliegue académico en AWS
 
-La guía de [`infra/aws`](infra/aws/README.md) describe el despliegue con OpenTofu en dos instancias EC2 y ofrece también una plantilla alternativa de AWS CloudFormation. Incluye backend S3 compartido y bloqueo de concurrencia para OpenTofu, además de preparación de variables, copia y configuración del código, CORS y eliminación de recursos.
+La guía de [`infra/aws`](infra/aws/README.md) describe el despliegue con OpenTofu en dos instancias EC2, usando cloud-init para clonar desde Git, preparar MySQL y dejar los servicios activos. Ofrece también una plantilla alternativa de AWS CloudFormation. Incluye backend S3 compartido y bloqueo de concurrencia para OpenTofu, preparación de variables, CORS y eliminación de recursos.
 
-Esta configuración es para pruebas académicas: usa HTTP, IP públicas dinámicas y no configura dominio, HTTPS, alta disponibilidad ni respaldos de la aplicación. El estado de OpenTofu se cifra y versiona en S3. No la uses con datos personales reales. No publiques credenciales, estados de OpenTofu ni la llave SSH privada.
+Esta configuración es para pruebas académicas: usa HTTP, Elastic IP públicas y no configura dominio, HTTPS, alta disponibilidad ni respaldos de la aplicación. El estado de OpenTofu se cifra y versiona en S3. No la uses con datos personales reales. No publiques credenciales, estados de OpenTofu ni la llave SSH privada.
 
 ## Primera utilización y Excel
 

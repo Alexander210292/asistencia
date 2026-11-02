@@ -20,7 +20,7 @@ La plantilla alternativa de CloudFormation está en [`CloudFormation/asistencia.
 
 ## Despliegue alternativo con CloudFormation
 
-Este template crea la misma arquitectura de red y EC2: VPC `10.24.0.0/16`, una subred pública `/24`, Internet Gateway y ruta pública, grupos de seguridad, y dos instancias Ubuntu 24.04 con volúmenes gp3 cifrados de 12 GiB. No configura MySQL, Node.js, la aplicación ni sus servicios, igual que el módulo OpenTofu actual. La regla API usa el CIDR indicado, SSH se restringe al CIDR del operador y no existe regla entrante para MySQL.
+Este template crea la misma base de red y EC2: VPC `10.24.0.0/16`, una subred pública `/24`, Internet Gateway y ruta pública, grupos de seguridad, y dos instancias Ubuntu 24.04 con volúmenes gp3 cifrados de 12 GiB. A diferencia del flujo OpenTofu descrito abajo, CloudFormation no configura automáticamente Node.js, MySQL, la aplicación ni sus servicios. La regla API usa el CIDR indicado, SSH se restringe al CIDR del operador y no existe regla entrante para MySQL.
 
 CloudFormation no comparte las llaves privadas que crea una plantilla. Crea primero un key pair EC2 en la consola de AWS o con AWS CLI, guarda el `.pem` de forma segura y pasa únicamente el nombre del key pair como parámetro. Define también el CIDR público de tu operador para SSH, por ejemplo `203.0.113.10/32`.
 
@@ -59,6 +59,7 @@ Es un entorno de pruebas: la aplicación se sirve por HTTP, sin dominio, TLS/HTT
 | `main.tf` | Declara OpenTofu y los proveedores AWS, TLS y Local. Crea VPC, subred IPv4, Internet Gateway, rutas, llave SSH, security groups y las dos instancias EC2 Ubuntu. |
 | `variables.tf` | Define región, tipo de instancia y rangos CIDR configurables. Las credenciales las obtiene el proveedor del perfil AWS local. |
 | `outputs.tf` | Imprime URLs, comandos SSH, IP privada del backend y ruta local de la llave PEM. |
+| `cloud-init/` | Scripts locales `*.sh.tftpl` ejecutados al primer arranque para instalar dependencias, clonar Git, inicializar MySQL y activar systemd. |
 | `backend.tf` | Declara el backend S3; la configuración de bucket y clave se suministra desde el archivo local ignorado `backend.hcl`. |
 | `backend.hcl.example` | Plantilla sin credenciales para apuntar al bucket de estado compartido. Cada operador la copia a `backend.hcl` y completa el nombre del bucket y la región. |
 | `state-bootstrap/` | Crea el bucket S3 de estado con acceso público bloqueado, cifrado, versionado y política que exige HTTPS. Su estado también se migra al mismo bucket. `backend.tf.example` se copia a `backend.tf` tras crear el bucket. |
@@ -68,7 +69,7 @@ Es un entorno de pruebas: la aplicación se sirve por HTTP, sin dominio, TLS/HTT
 | `terraform.tfstate` | Antes de la migración, estado local existente. Después, el estado activo se mantiene en S3; contiene información sensible, incluida la llave privada generada. |
 | `../../.gitignore` | Archivo de exclusiones ubicado en la raíz del repositorio; omite `.terraform`, estado, planes, variables locales y llaves PEM. |
 
-La configuración solo usa IPv4. Las direcciones públicas de EC2 pueden cambiar si se detienen y vuelven a iniciar las instancias.
+La configuración solo usa IPv4. Elastic IP mantiene estables las direcciones públicas de ambos servidores mientras el stack exista.
 
 ## Costos y requisitos de AWS
 
@@ -191,16 +192,31 @@ Obtén la IPv4 pública actual de tu red de administración desde PowerShell:
 (curl.exe -4 -s https://checkip.amazonaws.com).Trim()
 ```
 
-Agrega `/32` al resultado para permitir SSH solo desde esa dirección. Crea `infra/aws/terraform.tfvars` localmente, sustituyendo todos los marcadores:
+Agrega `/32` al resultado para permitir SSH solo desde esa dirección. Crea `infra/aws/terraform.tfvars` localmente:
 
 ```hcl
-aws_region       = "us-east-1"
+aws_region       = "us-east-2"
 instance_type    = "t3.micro"
 ssh_ingress_cidr = "TU_IPV4_PUBLICA/32"
 api_ingress_cidr = "0.0.0.0/0"
+repository_url   = "https://github.com/Alexander210292/asistencia.git"
+repository_ref   = "main"
 ```
 
 `api_ingress_cidr = "0.0.0.0/0"` deja el API accesible desde cualquier IPv4, necesario si los estudiantes usarán redes distintas. Para una demostración privada, limita ese rango a las IP cliente conocidas. No abras el puerto 3306.
+
+### Preparar las contraseñas en SSM
+
+Antes de aplicar, crea dos parámetros de tipo `SecureString` (usando la clave KMS administrada por AWS `aws/ssm`) en AWS Systems Manager → Parameter Store, en la misma región de `aws_region`:
+
+```text
+/uagrm-asistencia/academic-demo/db-password
+/uagrm-asistencia/academic-demo/admin-password
+```
+
+Usa valores aleatorios diferentes, de 12 a 128 caracteres, solo letras, números, guion bajo o guion. El backend recibe permiso IAM para leer y descifrar únicamente esos parámetros. No pongas las contraseñas en `terraform.tfvars`, Git, `user_data` ni en comandos que las dejen en el historial del shell. Los nombres se pueden cambiar con `db_password_parameter_name` y `admin_password_parameter_name`.
+
+El código se obtiene del repositorio GitHub público indicado por `repository_url`, en la rama/tag `repository_ref`. Cambiar `repository_ref` o los scripts de cloud-init reemplaza las instancias; cambiar el código publicado conservando la misma rama no lo despliega automáticamente en instancias existentes. Para aplicar cambios, actualiza el ref a un commit/tag y recrea las instancias o configura después un mecanismo de despliegue continuo.
 
 ## Inicializar y revisar el plan
 
@@ -214,14 +230,14 @@ tofu validate
 tofu plan
 ```
 
-El plan esperado incluye dos EC2 y recursos de red, security groups y llave. Léelo con atención. `tofu plan` no crea recursos ni confirma que el costo sea cero. Cuando hayas revisado permisos y costos en Billing, crea la infraestructura:
+El plan esperado incluye dos EC2, dos Elastic IP, un rol IAM acotado a los parámetros SSM y los recursos de red, security groups y llave. Léelo con atención. `tofu plan` no crea recursos ni confirma que el costo sea cero. Cuando hayas revisado permisos y costos en Billing, crea la infraestructura:
 
 ```powershell
-tofu apply
+tofu apply -lock-timeout=10m
 tofu output
 ```
 
-Confirma el plan escribiendo `yes`. Guarda las salidas `frontend_url`, `backend_api_url`, `frontend_ssh` y `backend_ssh`; las IP de ejemplo de esta guía no son permanentes. Limita el ACL de la llave PEM en Windows:
+Confirma el plan escribiendo `yes`. El primer arranque tardará varios minutos mientras cloud-init instala Node.js/MySQL, clona Git, configura la base y habilita los servicios. Guarda las salidas `frontend_url`, `backend_api_url`, `frontend_ssh` y `backend_ssh`. Limita el ACL de la llave PEM en Windows:
 
 ```powershell
 cd "F:\Diplomado\Mod2\asistencia\infra\aws"
@@ -230,7 +246,29 @@ icacls .\asistencia-aws.pem /inheritance:r /grant:r "$($env:USERNAME):(R)"
 
 No compartas el `.pem` ni el archivo de estado.
 
-## Preparar el backend
+## Verificar cloud-init
+
+Cloud-init deja listos los servicios `asistencia-backend` y `asistencia-frontend` durante el primer arranque. Comprueba su estado usando las salidas de `tofu output`:
+
+```powershell
+ssh -i .\asistencia-aws.pem ubuntu@IP_BACKEND "sudo cloud-init status --long; sudo systemctl status mysql asistencia-backend --no-pager"
+ssh -i .\asistencia-aws.pem ubuntu@IP_FRONTEND "sudo cloud-init status --long; sudo systemctl status asistencia-frontend --no-pager"
+```
+
+La instalación necesita que los parámetros SSM existan, que el rol pueda leerlos y que las instancias tengan salida a Internet para apt, NodeSource y GitHub. Si cloud-init falla, consulta sus logs y los de systemd (sin mostrar `.env.backend` ni los valores SSM):
+
+```powershell
+ssh -i .\asistencia-aws.pem ubuntu@IP_BACKEND "sudo tail -n 100 /var/log/cloud-init-output.log; sudo journalctl -u asistencia-backend -n 100 --no-pager"
+ssh -i .\asistencia-aws.pem ubuntu@IP_FRONTEND "sudo tail -n 100 /var/log/cloud-init-output.log; sudo journalctl -u asistencia-frontend -n 100 --no-pager"
+```
+
+Abre `frontend_url` en el navegador. Ingresa como `admin` usando la contraseña inicial guardada en SSM. Si cloud-init indica error, revisa `/var/log/cloud-init-output.log`, `sudo systemctl status mysql asistencia-backend --no-pager` y `sudo journalctl -u asistencia-backend -n 100 --no-pager`; no muestres ni compartas `.env.backend` ni valores SSM.
+
+El valor de `admin-password` se usa solo para crear el administrador la primera vez y se elimina del archivo de entorno de la instancia al terminar la inicialización. Como el inicializador conserva la cuenta existente, cambiar después el parámetro SSM no cambia la contraseña almacenada. La rotación de una contraseña administrativa existente requiere un procedimiento de actualización de credenciales en la base de datos; cambiar el parámetro por sí solo no la rota.
+
+## Procedimiento manual de contingencia: backend
+
+> Procedimiento manual de contingencia. El flujo normal de OpenTofu ya realiza estos pasos mediante `cloud-init/`; no los repitas en instancias recién creadas.
 
 Usa la IP pública actual de `backend_ssh` y conéctate desde PowerShell:
 
@@ -340,7 +378,7 @@ sudo systemctl status asistencia-backend --no-pager
 
 Para ver logs: `sudo journalctl -u asistencia-backend -f`.
 
-## Preparar el frontend
+## Procedimiento manual de contingencia: frontend
 
 En PowerShell local, copia los archivos a la instancia frontend usando su IP pública actual:
 
@@ -404,7 +442,7 @@ sudo systemctl status asistencia-frontend --no-pager
 
 Los logs se consultan con `sudo journalctl -u asistencia-frontend -f`.
 
-## Verificar el despliegue
+## Verificación manual adicional
 
 Abre `frontend_url` en el navegador. El backend debe estar activo y su `FRONTEND_ORIGINS` debe coincidir exactamente con el origen del navegador, incluido protocolo y puerto. Desde PowerShell puedes comprobar el preflight CORS:
 

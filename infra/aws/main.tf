@@ -92,6 +92,28 @@ resource "aws_route_table_association" "public" {
   route_table_id = aws_route_table.public.id
 }
 
+resource "aws_eip" "frontend" {
+  domain = "vpc"
+
+  tags = { Name = "asistencia-frontend-eip" }
+}
+
+resource "aws_eip" "backend" {
+  domain = "vpc"
+
+  tags = { Name = "asistencia-backend-eip" }
+}
+
+resource "aws_eip_association" "frontend" {
+  allocation_id = aws_eip.frontend.id
+  instance_id   = aws_instance.frontend.id
+}
+
+resource "aws_eip_association" "backend" {
+  allocation_id = aws_eip.backend.id
+  instance_id   = aws_instance.backend.id
+}
+
 resource "tls_private_key" "ssh" {
   algorithm = "RSA"
   rsa_bits  = 4096
@@ -170,13 +192,72 @@ resource "aws_security_group" "backend" {
   tags = { Name = "asistencia-backend-sg" }
 }
 
+data "aws_caller_identity" "current" {}
+
+resource "aws_iam_role" "backend" {
+  name = "asistencia-backend-ssm"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+
+  tags = { Name = "asistencia-backend-ssm" }
+}
+
+resource "aws_iam_role_policy" "backend_secrets" {
+  name = "read-attendance-ssm-secrets"
+  role = aws_iam_role.backend.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = ["ssm:GetParameter"]
+        Resource = [
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.db_password_parameter_name}",
+          "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.admin_password_parameter_name}"
+        ]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "ssm.${var.aws_region}.amazonaws.com"
+          }
+          StringLike = {
+            "kms:EncryptionContext:PARAMETER_ARN" = [
+              "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.db_password_parameter_name}",
+              "arn:aws:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.admin_password_parameter_name}"
+            ]
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_instance_profile" "backend" {
+  name = "asistencia-backend"
+  role = aws_iam_role.backend.name
+}
+
 resource "aws_instance" "frontend" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
   key_name                    = aws_key_pair.deploy.key_name
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.frontend.id]
-  associate_public_ip_address = true
+  associate_public_ip_address = false
 
   metadata_options {
     http_endpoint = "enabled"
@@ -189,6 +270,16 @@ resource "aws_instance" "frontend" {
     encrypted             = true
     delete_on_termination = true
   }
+
+  user_data = templatefile("${path.module}/cloud-init/frontend.sh.tftpl", {
+    aws_region     = var.aws_region
+    repository_url = var.repository_url
+    repository_ref = var.repository_ref
+    backend_url    = "http://${aws_eip.backend.public_ip}:3000"
+  })
+  user_data_replace_on_change = true
+
+  depends_on = [aws_route_table_association.public]
 
   tags = { Name = "asistencia-frontend" }
 }
@@ -199,7 +290,7 @@ resource "aws_instance" "backend" {
   key_name                    = aws_key_pair.deploy.key_name
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.backend.id]
-  associate_public_ip_address = true
+  associate_public_ip_address = false
 
   metadata_options {
     http_endpoint = "enabled"
@@ -212,6 +303,23 @@ resource "aws_instance" "backend" {
     encrypted             = true
     delete_on_termination = true
   }
+
+  iam_instance_profile = aws_iam_instance_profile.backend.name
+
+  user_data = templatefile("${path.module}/cloud-init/backend.sh.tftpl", {
+    aws_region                    = var.aws_region
+    repository_url                = var.repository_url
+    repository_ref                = var.repository_ref
+    db_password_parameter_name    = var.db_password_parameter_name
+    admin_password_parameter_name = var.admin_password_parameter_name
+    frontend_origin               = "http://${aws_eip.frontend.public_ip}:8080"
+  })
+  user_data_replace_on_change = true
+
+  depends_on = [
+    aws_iam_role_policy.backend_secrets,
+    aws_route_table_association.public
+  ]
 
   tags = { Name = "asistencia-backend" }
 }

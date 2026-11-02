@@ -1,0 +1,50 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update
+apt-get install -y ca-certificates curl git
+
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install -y nodejs
+
+useradd --system --user-group --home-dir /opt/asistencia --shell /usr/sbin/nologin asistencia
+git clone --depth 1 --single-branch --branch '${repository_ref}' '${repository_url}' /opt/asistencia
+chown -R asistencia:asistencia /opt/asistencia
+
+umask 077
+printf '%s\n' \
+  'FRONTEND_HOST=0.0.0.0' \
+  'FRONTEND_PORT=8080' \
+  'API_BASE_URL=${backend_url}' \
+  > /opt/asistencia/.env.frontend
+chown asistencia:asistencia /opt/asistencia/.env.frontend
+chmod 600 /opt/asistencia/.env.frontend
+
+runuser -u asistencia -- npm --prefix /opt/asistencia ci --omit=dev
+
+cat > /etc/systemd/system/asistencia-frontend.service <<'UNIT'
+[Unit]
+Description=UAGRM Attendance Web Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=asistencia
+Group=asistencia
+WorkingDirectory=/opt/asistencia
+EnvironmentFile=/opt/asistencia/.env.frontend
+ExecStart=/usr/bin/node frontend/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now asistencia-frontend
